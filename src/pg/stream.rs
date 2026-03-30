@@ -17,10 +17,15 @@
 //! If `on_xlog_data` returns `Err` (e.g. [`crate::error::MyelinError::PayloadTooLarge`] under **stall**),
 //! we **never** reach the Commit handler for that turn — the loop exits and the slot does not advance past
 //! the failed work.
+//!
+//! **Graceful shutdown**: when the process receives **SIGINT** (Ctrl+C) or **SIGTERM** (Unix), we stop
+//! waiting for the next replication event after the **current** event handler returns — i.e. we do not
+//! interrupt an in-flight `XLogData` decode/publish batch.
 
 use std::time::Instant;
 
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationConfig, ReplicationEvent};
+use tokio::pin;
 
 use crate::config::JetStreamConfig;
 use crate::config::PgReplicationConfig;
@@ -55,11 +60,32 @@ impl ReplicationPublisher {
     }
 }
 
+/// Waits for SIGINT (all platforms) and SIGTERM on Unix (containers / `kill`).
+pub async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("register SIGTERM for graceful shutdown");
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => { let _ = r; },
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// Consume replication until stop or error.
 pub async fn run_replication(
     cfg: &PgReplicationConfig,
     publisher: &mut ReplicationPublisher,
 ) -> Result<()> {
+    let shutdown = wait_for_shutdown_signal();
+    pin!(shutdown);
+
     let repl = ReplicationConfig {
         host: cfg.host.clone(),
         port: cfg.port,
@@ -81,9 +107,23 @@ pub async fn run_replication(
 
     let mut tx_xid: Option<u32> = None;
 
-    while let Some(ev) = client.recv().await? {
-        match ev {
-            ReplicationEvent::Begin { xid, .. } => {
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                metrics::counter!("myelin_shutdown_signals_total").increment(1);
+                tracing::info!(
+                    slot = %cfg.slot_name,
+                    "graceful shutdown: stop requested (SIGINT/SIGTERM); exiting after no in-flight recv"
+                );
+                return Ok(());
+            }
+            res = client.recv() => {
+                let ev = match res? {
+                    Some(e) => e,
+                    None => break,
+                };
+                match ev {
+                    ReplicationEvent::Begin { xid, .. } => {
                 metrics::counter!("myelin_replication_events_total", "kind" => "begin")
                     .increment(1);
                 tx_xid = Some(xid);
@@ -94,8 +134,8 @@ pub async fn run_replication(
                     tx_xid = xid,
                     "replication_protocol"
                 );
-            }
-            ReplicationEvent::Commit { end_lsn, .. } => {
+                    }
+                    ReplicationEvent::Commit { end_lsn, .. } => {
                 metrics::counter!("myelin_replication_events_total", "kind" => "commit")
                     .increment(1);
                 metrics::gauge!("myelin_replication_last_commit_end_lsn_raw")
@@ -111,8 +151,8 @@ pub async fn run_replication(
                 );
                 // See module doc: boundary-only Commit may carry end_lsn beyond last XLogData wal_end.
                 client.update_applied_lsn(end_lsn);
-            }
-            ReplicationEvent::XLogData { wal_end, data, .. } => {
+                    }
+                    ReplicationEvent::XLogData { wal_end, data, .. } => {
                 metrics::counter!("myelin_replication_events_total", "kind" => "xlog_data")
                     .increment(1);
                 metrics::histogram!("myelin_replication_xlog_chunk_bytes")
@@ -137,10 +177,10 @@ pub async fn run_replication(
                     tx_xid,
                     "decoded_and_published_chunk"
                 );
-            }
-            ReplicationEvent::KeepAlive { .. } => {}
-            ReplicationEvent::Message { .. } => {}
-            ReplicationEvent::StoppedAt { .. } => {
+                    }
+                    ReplicationEvent::KeepAlive { .. } => {}
+                    ReplicationEvent::Message { .. } => {}
+                    ReplicationEvent::StoppedAt { .. } => {
                 metrics::counter!("myelin_replication_events_total", "kind" => "stopped")
                     .increment(1);
                 tracing::info!(
@@ -149,7 +189,9 @@ pub async fn run_replication(
                     event = "stopped",
                     "replication_stream_ended"
                 );
-                break;
+                        break;
+                    }
+                }
             }
         }
     }

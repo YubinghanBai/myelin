@@ -77,9 +77,13 @@ Script phases (see header in `scripts/e2e_local.sh` and [`PLAN.md`](./PLAN.md)):
 | `MYELIN_DLQ_SUBJECT` | Dead-letter subject when policy is `dead_letter` |
 | `MYELIN_LOG_ENVELOPE` | If `1`, log each JetStream publish (testing / debug) |
 | `MYELIN_METRICS_ADDR` | If set (e.g. `127.0.0.1:9095`), expose Prometheus scrape HTTP (plaintext; bind carefully) |
+| `MYELIN_PUBLISH_MAX_ATTEMPTS` | JetStream publish + PubAck tries per message (default `8`, minimum `1`) |
+| `MYELIN_PUBLISH_RETRY_INITIAL_MS` | First backoff after a failed publish/ack (default `100`) |
+| `MYELIN_PUBLISH_RETRY_MAX_MS` | Backoff cap; doubles each retry (default `5000`) |
 
 ### Observability
 
+- **Graceful shutdown**: **Ctrl+C** (SIGINT) or **SIGTERM** (Unix, e.g. Kubernetes) stops waiting for the next replication event after the **current** WAL event handler finishes (an in-flight `XLogData` batch is not cancelled mid-way).
 - **Structured tracing** (`target: myelin::replication`): per-chunk `xlog_data` / `commit` at **debug** — use `RUST_LOG=info,myelin::replication=debug` (or `trace`) for decode/publish detail without drowning unrelated crates.
 - **Prometheus** (when `MYELIN_METRICS_ADDR` is set): counters and histograms include, among others:
 
@@ -93,6 +97,8 @@ Script phases (see header in `scripts/e2e_local.sh` and [`PLAN.md`](./PLAN.md)):
 | `myelin_envelopes_materialized_total` | counter | Rows decoded to envelopes per chunk |
 | `myelin_jetstream_publish_ack_total` | counter `{op}` | JetStream PubAck after publish |
 | `myelin_oversize_dlq_total` | counter | Oversized rows sent as DLQ notice |
+| `myelin_jetstream_publish_retries_total` | counter | Backoff retries after publish/PubAck failure |
+| `myelin_shutdown_signals_total` | counter | SIGINT/SIGTERM graceful shutdown path taken |
 
 **Slot lag** is not computed inside myelin; correlate with Postgres ([ops checklist](#operations-checklist) below).
 

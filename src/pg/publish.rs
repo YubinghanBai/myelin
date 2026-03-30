@@ -6,10 +6,13 @@
 //! pgwire emits Commit without another `XLogData` — see `stream.rs` module docs.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
+use bytes::Bytes;
 use pgwire_replication::{Lsn, ReplicationClient};
+use tokio::time::sleep;
 
-use crate::config::{JetStreamConfig, OversizedPayloadPolicy};
+use crate::config::{JetStreamConfig, OversizedPayloadPolicy, PublishRetryConfig};
 use crate::error::{MyelinError, Result};
 use crate::pg::decode::RelationMeta;
 use crate::pg::pgoutput::{ChangeEnvelope, materialize_messages};
@@ -60,6 +63,7 @@ pub struct JetStreamPublisher {
     max_payload_bytes: usize,
     oversized_policy: OversizedPayloadPolicy,
     dead_letter_subject: String,
+    publish_retry: PublishRetryConfig,
     relations: HashMap<u32, RelationMeta>,
 }
 
@@ -85,8 +89,71 @@ impl JetStreamPublisher {
             max_payload_bytes: cfg.max_payload_bytes,
             oversized_policy: cfg.oversized_policy,
             dead_letter_subject: cfg.dead_letter_subject.clone(),
+            publish_retry: cfg.publish_retry.clone(),
             relations: HashMap::new(),
         })
+    }
+
+    /// Publish and await PubAck with exponential backoff on transient NATS errors.
+    async fn publish_ack_with_retry(&self, subject: &str, payload: Bytes) -> Result<()> {
+        let cfg = &self.publish_retry;
+        let max = cfg.max_attempts.max(1);
+        let mut delay_ms = cfg.initial_delay_ms.max(1);
+        let max_delay = cfg.max_delay_ms.max(delay_ms);
+
+        let mut last_err: Option<String> = None;
+        for attempt in 0..max {
+            let ack_fut = self
+                .jetstream
+                .publish(subject.to_string(), payload.clone())
+                .await
+                .map_err(|e| MyelinError::Nats(e.to_string()));
+            let ack_fut = match ack_fut {
+                Ok(f) => f,
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    if attempt + 1 >= max {
+                        return Err(e);
+                    }
+                    metrics::counter!("myelin_jetstream_publish_retries_total").increment(1);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = max,
+                        delay_ms,
+                        subject = %subject,
+                        error = %last_err.as_deref().unwrap_or(""),
+                        "JetStream publish failed; retrying"
+                    );
+                    sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(max_delay);
+                    continue;
+                }
+            };
+            match ack_fut.await {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    let msg = e.to_string();
+                    last_err = Some(msg.clone());
+                    if attempt + 1 >= max {
+                        return Err(MyelinError::Nats(msg));
+                    }
+                    metrics::counter!("myelin_jetstream_publish_retries_total").increment(1);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = max,
+                        delay_ms,
+                        subject = %subject,
+                        error = %msg,
+                        "JetStream PubAck failed; retrying"
+                    );
+                    sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2).min(max_delay);
+                }
+            }
+        }
+        Err(MyelinError::Nats(
+            last_err.unwrap_or_else(|| "publish retry exhausted".into()),
+        ))
     }
 
     fn subject_for(&self, env: &ChangeEnvelope) -> String {
@@ -149,26 +216,14 @@ impl JetStreamPublisher {
                                 max: self.max_payload_bytes,
                             });
                         }
-                        let ack_fut = self
-                            .jetstream
-                            .publish(self.dead_letter_subject.clone(), dlq.into())
-                            .await
-                            .map_err(|e| MyelinError::Nats(e.to_string()))?;
-                        ack_fut
-                            .await
-                            .map_err(|e| MyelinError::Nats(e.to_string()))?;
+                        self.publish_ack_with_retry(&self.dead_letter_subject, Bytes::from(dlq))
+                            .await?;
                     }
                 }
                 continue;
             }
-            let ack_fut = self
-                .jetstream
-                .publish(subject, payload.into())
-                .await
-                .map_err(|e| MyelinError::Nats(e.to_string()))?;
-            ack_fut
-                .await
-                .map_err(|e| MyelinError::Nats(e.to_string()))?;
+            self.publish_ack_with_retry(&subject, Bytes::from(payload))
+                .await?;
             metrics::counter!("myelin_jetstream_publish_ack_total", "op" => env.op).increment(1);
             log_jetstream_envelope_if_enabled(&env)?;
         }

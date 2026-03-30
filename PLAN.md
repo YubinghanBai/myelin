@@ -113,7 +113,7 @@ CREATE PUBLICATION my_pub FOR TABLE workflow_events;
 
 - **背压与观测**：复制滞后、槽 WAL 量、JetStream pending。已实现：**`MYELIN_METRICS_ADDR` → Prometheus 抓取**（计数器/直方图，见 README 表）、**`myelin::replication` 结构化 debug 日志**；槽滞后仍以 PG 侧查询与告警为主。
 - **范围扩展**：**`UPDATE` / `DELETE`**（pgoutput 已解码 → 信封 `op`=`update`|`delete`；`update` 在带旧行/键时填 `old_row`）**；**`TRUNCATE` (T)** 仍显式未实现。多表 subject 路由、schema 变更策略等按需再加。
-- **韧性**：可选 **mTLS**、publish 重试退避、**死信队列** subject；优雅停机（SIGTERM  drain）。
+- **韧性**：可选 **mTLS**；**JetStream publish / PubAck** 已实现有限次指数退避（环境变量见 README）；**死信队列** subject；**优雅停机**：SIGINT + Unix **SIGTERM**，在「当前 recv 周期」之后退出（不在半段 `XLogData` 上强行打断）。
 
 ### 阶段 5 — 开源与性能（目标）
 

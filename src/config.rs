@@ -52,6 +52,14 @@ mod tests {
             OversizedPayloadPolicy::DeadLetter
         );
     }
+
+    #[test]
+    fn publish_retry_default() {
+        let c = super::PublishRetryConfig::default();
+        assert_eq!(c.max_attempts, 8);
+        assert_eq!(c.initial_delay_ms, 100);
+        assert_eq!(c.max_delay_ms, 5000);
+    }
 }
 
 /// Connection targets for admin (SQL) vs logical replication stream.
@@ -71,6 +79,47 @@ pub struct PgReplicationConfig {
     pub publication_name: String,
 }
 
+/// Backoff for JetStream publish + PubAck transient failures.
+#[derive(Clone, Debug)]
+pub struct PublishRetryConfig {
+    /// Total attempts per message (first try + retries). Minimum 1.
+    pub max_attempts: u32,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl Default for PublishRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 8,
+            initial_delay_ms: 100,
+            max_delay_ms: 5_000,
+        }
+    }
+}
+
+impl PublishRetryConfig {
+    pub fn from_env() -> Self {
+        let mut c = Self::default();
+        if let Ok(s) = std::env::var("MYELIN_PUBLISH_MAX_ATTEMPTS")
+            && let Ok(n) = s.trim().parse::<u32>()
+        {
+            c.max_attempts = n.max(1);
+        }
+        if let Ok(s) = std::env::var("MYELIN_PUBLISH_RETRY_INITIAL_MS")
+            && let Ok(n) = s.trim().parse::<u64>()
+        {
+            c.initial_delay_ms = n.max(1);
+        }
+        if let Ok(s) = std::env::var("MYELIN_PUBLISH_RETRY_MAX_MS")
+            && let Ok(n) = s.trim().parse::<u64>()
+        {
+            c.max_delay_ms = n.max(c.initial_delay_ms);
+        }
+        c
+    }
+}
+
 /// JetStream sink (binary enables this when `NATS_URL` is set).
 #[derive(Clone, Debug)]
 pub struct JetStreamConfig {
@@ -81,4 +130,5 @@ pub struct JetStreamConfig {
     pub oversized_policy: OversizedPayloadPolicy,
     /// JetStream subject for [`OversizedPayloadPolicy::DeadLetter`] notices (must match stream subject filter).
     pub dead_letter_subject: String,
+    pub publish_retry: PublishRetryConfig,
 }

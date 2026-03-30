@@ -12,7 +12,7 @@ pub mod error;
 pub mod pg;
 mod prom;
 
-pub use config::{JetStreamConfig, OversizedPayloadPolicy};
+pub use config::{JetStreamConfig, OversizedPayloadPolicy, PublishRetryConfig};
 pub use error::{MyelinError, Result};
 pub use pg::stream::{ReplicationPublisher, run_replication};
 

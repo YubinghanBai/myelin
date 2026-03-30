@@ -3,7 +3,9 @@ use std::env;
 use tracing_subscriber::EnvFilter;
 
 use myelin::Result;
-use myelin::config::{JetStreamConfig, OversizedPayloadPolicy, PgAdminConfig, PgReplicationConfig};
+use myelin::config::{
+    JetStreamConfig, OversizedPayloadPolicy, PgAdminConfig, PgReplicationConfig, PublishRetryConfig,
+};
 use myelin::init_metrics_from_env;
 use myelin::pg::admin::{
     ensure_events_table, ensure_logical_slot, ensure_publication_includes_table,
@@ -68,6 +70,7 @@ async fn main() -> Result<()> {
                 .unwrap_or(768 * 1024),
             oversized_policy: OversizedPayloadPolicy::from_env(),
             dead_letter_subject,
+            publish_retry: PublishRetryConfig::from_env(),
         }
     });
 
@@ -83,7 +86,7 @@ async fn main() -> Result<()> {
         tracing::info!(%addr, "Prometheus metrics HTTP scrape endpoint (MYELIN_METRICS_ADDR)");
     }
 
-    tracing::info!("starting replication (Ctrl+C to stop)");
+    tracing::info!("starting replication (Ctrl+C or SIGTERM for graceful exit)");
     run_replication(&repl, &mut publisher).await?;
 
     Ok(())
