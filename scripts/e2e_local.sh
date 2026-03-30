@@ -38,17 +38,20 @@ else
   export NATS_URL="${NATS_URL:-nats://127.0.0.1:4222}"
 fi
 
-docker compose up -d
+# `--wait` blocks until services with a healthcheck report healthy (Compose v2.29+).
+# Without it, `up -d` can return while Postgres is still starting; CI then often fails `pg_isready`.
+docker compose up -d --wait --wait-timeout 180
 
-echo "[e2e] PGHOST=$PGHOST PGPORT=$PGPORT BIN target=$TARGET_DIR/release/myelin"
-echo "[e2e] Waiting for Postgres ($PG_CONTAINER)..."
-for _ in $(seq 1 45); do
-  if docker exec "$PG_CONTAINER" pg_isready -U postgres -d postgres &>/dev/null; then
+echo "[e2e] PGHOST=$PGHOST PGPORT=$PGPORT target/release/myelin under $TARGET_DIR"
+echo "[e2e] Confirming Postgres ($PG_CONTAINER) accepts TCP..."
+for _ in $(seq 1 30); do
+  # Prefer TCP inside the container (matches how clients hit the mapped port).
+  if docker exec "$PG_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -d postgres &>/dev/null; then
     break
   fi
   sleep 1
 done
-docker exec "$PG_CONTAINER" pg_isready -U postgres -d postgres
+docker exec "$PG_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -d postgres
 
 # Free the logical slot if a prior myelin is still connected.
 docker exec "$PG_CONTAINER" psql -U postgres -d postgres -Atq -c \
