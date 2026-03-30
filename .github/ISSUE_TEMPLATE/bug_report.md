@@ -29,4 +29,4 @@ Paste relevant `tracing` lines or Prometheus samples. Remove passwords and conne
 
 ## Notes
 
-Optional: link to `PLAN.md` section if this is about semantics (LSN, at-least-once, oversized payload).
+Optional: if this is about semantics (LSN, at-least-once, oversized payload), point to the relevant `stream.rs` / `publish.rs` behavior or [`TESTING.md`](https://github.com/YubinghanBai/myelin/blob/main/TESTING.md).

@@ -16,4 +16,4 @@ What are you trying to achieve with myelin?
 
 ## Semantics & ops
 
-If this touches replication, JetStream, or LSN advancement, note any impact on **at-least-once** behavior and **slot/WAL** operations (see `PLAN.md`).
+If this touches replication, JetStream, or LSN advancement, note any impact on **at-least-once** behavior and **slot/WAL** operations (see `src/pg/stream.rs` / `src/pg/publish.rs` and [`TESTING.md`](https://github.com/YubinghanBai/myelin/blob/main/TESTING.md) for E2E coverage).

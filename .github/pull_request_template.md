@@ -20,7 +20,7 @@ What does this PR change and why?
 
 If this PR touches LSN feedback, JetStream publish order, or oversized payload handling:
 
-- [ ] Behavior matches or updates `PLAN.md` / `src/pg/stream.rs` / `src/pg/publish.rs` comments.
+- [ ] Behavior matches or updates `src/pg/stream.rs` / `src/pg/publish.rs` docs and [`TESTING.md`](./TESTING.md) if E2E expectations change.
 - [ ] No silent data loss on default `stall` policy unless explicitly documented.
 
 ## Checklist

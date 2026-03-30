@@ -434,7 +434,7 @@ if [[ "${USE_NATS:-0}" != "1" ]]; then
   echo ""
   echo "=== PASS Phase 1: burst + restart + resume + UPDATE/DELETE envelopes ==="
   echo "Note: at-least-once / duplicate envelopes on crash between decode and LSN update are possible;"
-  echo "      downstream should dedupe (e.g. correlation_id + lsn_hex). See PLAN.md."
+  echo "      downstream should dedupe (e.g. correlation_id + lsn_hex). See README.md / TESTING.md."
 
 # --- Phase 2: JetStream, monitoring /jsz, reconnect smoke ---
 else
