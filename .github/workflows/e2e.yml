@@ -1,0 +1,47 @@
+# Slim Docker E2E: JetStream Phase 2 + SIGTERM (no Phase 3 oversized / no Phase 6 bulk).
+# Full bulk + Phase 3 stay local: USE_NATS=1 ./scripts/e2e_local.sh
+
+name: E2E
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  USE_NATS: "1"
+  E2E_PHASE3: "0"
+  E2E_PHASE6: "0"
+  E2E_SIGTERM: "1"
+  E2E_NATS_FAULT: "0"
+
+jobs:
+  docker-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install jq (JetStream /jsz parsing in e2e script)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+
+      - name: Docker compose version
+        run: docker compose version
+
+      - name: Slim E2E (JetStream Phase 2 + SIGTERM)
+        run: ./scripts/e2e_local.sh

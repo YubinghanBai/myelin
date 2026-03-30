@@ -117,7 +117,7 @@ CREATE PUBLICATION my_pub FOR TABLE workflow_events;
 
 ### 阶段 5 — 开源与性能（目标）
 
-- **开源（GitHub）**：README（架构图、语义边界、运维清单）、Issue/PR 模板、**`SECURITY.md`**、MIT；CI（`fmt/clippy/test` + `cargo build --benches` + 可选 compose e2e）。
+- **开源（GitHub）**：README（架构图、语义边界、运维清单）、Issue/PR 模板、**`SECURITY.md`**、MIT；CI：`fmt/clippy/test` + `cargo build --benches`（`ci.yml`）；**精简 Docker E2E**（Phase 2 JetStream + SIGTERM，无 Phase 3/6 bulk，`e2e.yml`）；完整 bulk / Phase 3 仍本地或自建长作业。
 - **高性能叙事**：在文档中写明 **与 Java 连接器对比的维度**（单机吞吐、延迟、内存峰值），用**可复现**的 `INSERT` 基准脚本（如万级/十万级批量）+ 固定 PG/JetStream 版本；不夸大 「exactly-once」。
 
 ### 阶段 6 — 压测与断点续传（验收增强）

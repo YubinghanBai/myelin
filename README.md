@@ -129,7 +129,23 @@ Record **`docker compose images`** / image digests and **`E2E_BULK_ROWS`** next 
 
 **Integration spot-check (2026-03-30):** `USE_NATS=1 E2E_PHASE3=0 E2E_PHASE6=0 E2E_SIGTERM=1 E2E_NATS_FAULT=1 ./scripts/e2e_local.sh` passed locally — **SIGTERM → exit 0** and log line **graceful shutdown**; **`docker stop myelin-nats`** during run → **exit 1** after JetStream retries, script **restarts** NATS.
 
-**Author’s machine (fill when reporting):** Docker Desktop / engine version: _…_; `E2E_BULK_ROWS=2000` full JetStream run wall time: _…_ (optional).
+**GitHub Actions:** on every push/PR to `main`/`master`, [`.github/workflows/e2e.yml`](./.github/workflows/e2e.yml) runs the same slim recipe (`USE_NATS=1`, `E2E_PHASE3=0`, `E2E_PHASE6=0`, `E2E_SIGTERM=1`; **no** NATS-fault step). Full Phase 3 + Phase 6 bulk remains **local** unless you add a longer workflow.
+
+#### Recorded load / throughput (fill after you pin images and run locally)
+
+| Field | Example (replace with yours) |
+|-------|------------------------------|
+| Date | 2026-________ |
+| Host | e.g. Apple M2, 16 GB / one line from `uname -a` |
+| Docker | `docker version` — Client + Server (short) |
+| Postgres image | e.g. `postgres:16-alpine` @ `sha256:…` from `docker image inspect --format '{{index .RepoDigests 0}}' postgres:16-alpine` |
+| NATS image | e.g. `nats:2-alpine` @ `sha256:…` |
+| Command | `time USE_NATS=1 E2E_BULK_ROWS=____ ./scripts/e2e_local.sh` (full phases) |
+| Wall time | _____ s (from `time`) |
+| Bulk rows | `E2E_BULK_ROWS` = _____ |
+| Notes | e.g. rough rows/s for Phase 6 if you time that section separately |
+
+Keep **one row per machine + image digest**; bump the digest when you intentionally upgrade images.
 
 ## Operations checklist
 
@@ -152,7 +168,7 @@ Record **`docker compose images`** / image digests and **`E2E_BULK_ROWS`** next 
 
 ## CI & contributing
 
-GitHub Actions runs `cargo fmt`, `clippy -D warnings`, `cargo test`, and `cargo build --benches`. Docker-based E2E is optional locally (`scripts/e2e_local.sh`). Use [`.github/pull_request_template.md`](./.github/pull_request_template.md) and issue templates when opening PRs/issues.
+GitHub Actions runs **`ci.yml`**: `cargo fmt`, `clippy -D warnings`, `cargo test`, and `cargo build --benches`. **`e2e.yml`** runs a **slim** Docker JetStream + SIGTERM script on each push/PR to `main`/`master` (see [Reproducible E2E](#reproducible-e2e-and-load-notes)). Use [`.github/pull_request_template.md`](./.github/pull_request_template.md) and issue templates when opening PRs/issues.
 
 ## Docs
 

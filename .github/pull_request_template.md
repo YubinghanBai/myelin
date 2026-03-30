@@ -13,7 +13,8 @@ What does this PR change and why?
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
-- [ ] Local E2E (`./scripts/e2e_local.sh` and/or `USE_NATS=1 ...`) — if applicable
+- [ ] CI **E2E** workflow (slim JetStream + SIGTERM) green — or note why skipped
+- [ ] Local E2E full (`USE_NATS=1 ./scripts/e2e_local.sh` with Phase 3/6) — if you touch replication / publish / e2e script
 
 ## Semantics / replication
 
