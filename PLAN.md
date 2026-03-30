@@ -125,6 +125,7 @@ CREATE PUBLICATION my_pub FOR TABLE workflow_events;
 - **内容**：在 Compose 环境下 **批量 INSERT（如 1 万条）**；中途 **强杀** CDC 进程，再启动，**断言**槽位续传、下游收到条数与幂等策略一致（允许重复，不允许「少掉未声明的一大段」）。
 - **验收**：脚本化、可进 CI（时长与资源受限时可降规模）。
 - **本地**：默认 **`./scripts/e2e_local.sh`** 在 Phase 1/2 之后跑 **Phase 6**（`E2E_PHASE6=0` 跳过）。**`E2E_BULK_ROWS`** 默认 **2000**（常规门槛）；压测可设 5000+。等待时间随批量单调放宽（见脚本）。JetStream 路径下 Phase 6 会 **`export MYELIN_LOG_ENVELOPE=1`**（仅测试用），以便与 dry-run 相同用日志 grep 校验每条 `correlation_id`；生产勿开。
+- **SIGTERM / NATS 故障（可选环境变量）**：**`E2E_SIGTERM=1`** — 对独立 myelin 进程 **`kill -TERM`**，期望 **退出码 0** 且日志含 **graceful shutdown**。**`E2E_NATS_FAULT=1`**（需 **`USE_NATS=1`**）— 运行中 **`docker stop`** NATS 后再 `INSERT`，期望进程 **非 0 退出**（发布重试耗尽）；脚本 **`docker start`** 恢复 NATS。README「Reproducible E2E」表有示例命令。
 
 ## 执行原则
 

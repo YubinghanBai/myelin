@@ -9,6 +9,8 @@
 #   # Phase 3 — USE_NATS=1 only: oversized stall (exit ≠0) + drain replay; dead_letter + follow-up row (E2E_PHASE3=0 skips)
 #   # Phase 6 — bulk INSERT → kill myelin → restart → every correlation_id appears (at-least-once; duplicates OK)
 #   #   E2E_PHASE6=0 skips. E2E_BULK_ROWS defaults to 2000 (set 5000+ for stress). JetStream needs MYELIN_LOG_ENVELOPE=1 (set in script).
+#   # SIGTERM — graceful exit (exit code 0): E2E_SIGTERM=1 (default 0). Works with USE_NATS=0 or 1.
+#   # NATS fault — optional: E2E_NATS_FAULT=1 requires USE_NATS=1; stops NATS mid-run, expects myelin to exit non-zero after publish retries.
 #   Phase 1 (dry-run) + Phase 2 (JetStream) each run UPDATE + DELETE on public.events (replica identity = PK).
 #
 # Cursor / sandboxes may set CARGO_TARGET_DIR; BIN path follows real cargo output.
@@ -63,7 +65,8 @@ fi
 E2E_TAG="$(date +%s)-$RANDOM"
 LOG="$(mktemp)"
 LOG_P6=""
-trap '[[ -n "${MYELIN_PID:-}" ]] && kill "$MYELIN_PID" 2>/dev/null || true; rm -f "$LOG"; [[ -n "${LOG_P6:-}" ]] && rm -f "$LOG_P6"' EXIT
+LOG_SIGTERM=""
+trap '[[ -n "${MYELIN_PID:-}" ]] && kill "$MYELIN_PID" 2>/dev/null || true; rm -f "$LOG"; [[ -n "${LOG_P6:-}" ]] && rm -f "$LOG_P6"; [[ -n "${LOG_SIGTERM:-}" ]] && rm -f "$LOG_SIGTERM"' EXIT
 
 insert_row() {
   local cid="$1"
@@ -519,6 +522,134 @@ fi
 
 if [[ "${E2E_PHASE6:-1}" == "1" ]]; then
   phase6_bulk_kill_resume
+fi
+
+# --- SIGTERM: expect exit 0 and "graceful shutdown" in log (does not use MYELIN_PID / stop_myelin helpers). ---
+e2e_sigterm_graceful_exit() {
+  echo ""
+  echo "========== SIGTERM graceful exit (expect status 0) =========="
+  LOG_SIGTERM="$(mktemp)"
+  docker exec "$PG_CONTAINER" psql -U postgres -d postgres -Atq -c \
+    "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = 'myelin_slot' AND active_pid IS NOT NULL;" \
+    &>/dev/null || true
+  stop_myelin
+  sleep 1
+
+  if [[ "${USE_NATS:-0}" == "1" ]]; then
+    export MYELIN_LOG_ENVELOPE="${MYELIN_LOG_ENVELOPE:-1}"
+  fi
+
+  # RUST_LOG must include myelin for shutdown line (default script export is enough).
+  "$BIN" >>"$LOG_SIGTERM" 2>&1 &
+  local st_pid=$!
+  sleep 5
+  insert_row "e2e-${E2E_TAG}-sigterm-probe"
+  sleep 3
+  kill -TERM "$st_pid"
+
+  local ec=0
+  wait "$st_pid" || ec=$?
+  if [[ "$ec" -ne 0 ]]; then
+    echo "=== FAIL SIGTERM: expected exit status 0, got $ec ==="
+    tail -60 "$LOG_SIGTERM"
+    exit 1
+  fi
+  if ! grep -qiE 'graceful shutdown|shutdown signal' "$LOG_SIGTERM"; then
+    echo "=== FAIL SIGTERM: log should mention graceful shutdown (myelin shutdown path) ==="
+    tail -60 "$LOG_SIGTERM"
+    exit 1
+  fi
+  echo "--- myelin tail (SIGTERM) ---"
+  tail -15 "$LOG_SIGTERM"
+  echo "=== PASS SIGTERM: process exited 0 after SIGTERM ==="
+  if [[ "${USE_NATS:-0}" == "1" ]] && [[ "${MYELIN_LOG_ENVELOPE:-}" == "1" ]]; then
+    unset MYELIN_LOG_ENVELOPE || true
+  fi
+}
+
+# --- NATS stopped: publish path should fail after retries (USE_NATS=1 only). ---
+e2e_nats_fault_nonzero_exit() {
+  echo ""
+  echo "========== NATS fault: stop broker, expect myelin exit != 0 =========="
+  [[ "${USE_NATS:-0}" == "1" ]] || {
+    echo "=== SKIP E2E_NATS_FAULT: set USE_NATS=1 ==="
+    return 0
+  }
+  local LOG_NF CONTAINER_NATS
+  LOG_NF="$(mktemp)"
+  CONTAINER_NATS="${NATS_CONTAINER:-myelin-nats}"
+
+  docker exec "$PG_CONTAINER" psql -U postgres -d postgres -Atq -c \
+    "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = 'myelin_slot' AND active_pid IS NOT NULL;" \
+    &>/dev/null || true
+  stop_myelin
+  sleep 1
+
+  export MYELIN_LOG_ENVELOPE=1
+  # Speed up failure (still multiple retries).
+  export MYELIN_PUBLISH_MAX_ATTEMPTS="${MYELIN_PUBLISH_MAX_ATTEMPTS:-4}"
+  export MYELIN_PUBLISH_RETRY_INITIAL_MS="${MYELIN_PUBLISH_RETRY_INITIAL_MS:-80}"
+  export MYELIN_PUBLISH_RETRY_MAX_MS="${MYELIN_PUBLISH_RETRY_MAX_MS:-800}"
+
+  "$BIN" >>"$LOG_NF" 2>&1 &
+  local nf_pid=$!
+  sleep 5
+  insert_row "e2e-${E2E_TAG}-nf-before"
+  sleep 4
+
+  echo "[e2e] Stopping $CONTAINER_NATS (NATS fault)..."
+  docker stop "$CONTAINER_NATS" &>/dev/null || {
+    echo "=== FAIL NATS fault: docker stop $CONTAINER_NATS ==="
+    kill "$nf_pid" 2>/dev/null || true
+    rm -f "$LOG_NF"
+    exit 1
+  }
+
+  insert_row "e2e-${E2E_TAG}-nf-after-nats-down"
+  local w=0 ec=0
+  while kill -0 "$nf_pid" 2>/dev/null && (( w < 150 )); do
+    sleep 1
+    w=$((w + 1))
+  done
+  if kill -0 "$nf_pid" 2>/dev/null; then
+    echo "=== FAIL NATS fault: myelin still running after ${w}s (expected publish exhaustion) ==="
+    kill -TERM "$nf_pid" 2>/dev/null || true
+    wait "$nf_pid" 2>/dev/null || true
+    docker start "$CONTAINER_NATS" &>/dev/null || true
+    tail -40 "$LOG_NF"
+    rm -f "$LOG_NF"
+    exit 1
+  fi
+  wait "$nf_pid" || ec=$?
+  docker start "$CONTAINER_NATS" &>/dev/null || true
+  sleep 3
+  curl -sf "${NATS_MONITOR_URL}/varz" &>/dev/null || sleep 5
+
+  if [[ "$ec" -eq 0 ]]; then
+    echo "=== FAIL NATS fault: expected non-zero exit when NATS is down and rows are published ==="
+    tail -60 "$LOG_NF"
+    rm -f "$LOG_NF"
+    exit 1
+  fi
+  if ! grep -qiE 'nats|JetStream|publish|PubAck|error|Error|retrying' "$LOG_NF"; then
+    echo "=== WARN NATS fault: no obvious NATS/publish error in log (exit was $ec); check manually ==="
+  fi
+  echo "--- myelin tail (NATS fault) ---"
+  tail -25 "$LOG_NF"
+  echo "=== PASS NATS fault: myelin exited non-zero ($ec) after broker stop ==="
+  rm -f "$LOG_NF"
+  unset MYELIN_LOG_ENVELOPE || true
+  unset MYELIN_PUBLISH_MAX_ATTEMPTS || true
+  unset MYELIN_PUBLISH_RETRY_INITIAL_MS || true
+  unset MYELIN_PUBLISH_RETRY_MAX_MS || true
+}
+
+if [[ "${E2E_SIGTERM:-0}" == "1" ]]; then
+  e2e_sigterm_graceful_exit
+fi
+
+if [[ "${E2E_NATS_FAULT:-0}" == "1" ]]; then
+  e2e_nats_fault_nonzero_exit
 fi
 
 echo ""

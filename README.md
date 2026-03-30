@@ -112,6 +112,25 @@ cargo bench --bench envelope_json
 
 This does **not** replace end-to-end replication benchmarks; pair with `E2E_BULK_ROWS` / fixed PG+NATS versions for throughput stories ([`PLAN.md`](./PLAN.md)).
 
+### Reproducible E2E and load notes
+
+**Recommended image tags when you publish timing or throughput** (check [Docker Hub — `postgres`](https://hub.docker.com/_/postgres) / [`nats`](https://hub.docker.com/_/nats) for current patch):
+
+- **PostgreSQL:** `postgres:16-alpine` (compose default) or pin a patch such as **`postgres:16.13-alpine3.22`** once you confirm the tag exists locally (`docker pull …`).
+- **NATS:** `nats:2-alpine` (compose default) or pin e.g. **`nats:2.12.5-alpine`** for stable JetStream behavior across runs.
+
+Record **`docker compose images`** / image digests and **`E2E_BULK_ROWS`** next to any number you quote.
+
+| Run (example) | Purpose |
+|---------------|---------|
+| `USE_NATS=1 ./scripts/e2e_local.sh` | Full JetStream path including Phase 3 + Phase 6 (default bulk 2000). |
+| `USE_NATS=1 E2E_PHASE3=0 E2E_PHASE6=0 E2E_SIGTERM=1 ./scripts/e2e_local.sh` | Phase 2 smoke + **SIGTERM → exit status 0** + log line `graceful shutdown`. |
+| `USE_NATS=1 E2E_NATS_FAULT=1 E2E_SIGTERM=0 ./scripts/e2e_local.sh` | After Phase 2/3/6, stop NATS; expect myelin **non-zero** exit after publish retries (`E2E_SIGTERM=0` avoids extra process after fault). |
+
+**Integration spot-check (2026-03-30):** `USE_NATS=1 E2E_PHASE3=0 E2E_PHASE6=0 E2E_SIGTERM=1 E2E_NATS_FAULT=1 ./scripts/e2e_local.sh` passed locally — **SIGTERM → exit 0** and log line **graceful shutdown**; **`docker stop myelin-nats`** during run → **exit 1** after JetStream retries, script **restarts** NATS.
+
+**Author’s machine (fill when reporting):** Docker Desktop / engine version: _…_; `E2E_BULK_ROWS=2000` full JetStream run wall time: _…_ (optional).
+
 ## Operations checklist
 
 - **`wal_level=logical`** on the publisher (required for logical replication).

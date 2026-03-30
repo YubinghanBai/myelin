@@ -10,6 +10,7 @@
 services:
   postgres:
     container_name: myelin-postgres
+    # Pin patch in production benchmarks; `16-alpine` tracks latest 16.x (see README reproducible E2E).
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: postgres
@@ -33,6 +34,7 @@ services:
 
   nats:
     container_name: myelin-nats
+    # `2-alpine` tracks latest 2.x; pin e.g. `nats:2.12.5-alpine` when publishing numbers (README).
     image: nats:2-alpine
     ports:
       - "4222:4222"
