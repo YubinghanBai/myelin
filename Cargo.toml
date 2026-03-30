@@ -1,0 +1,42 @@
+[package]
+name = "myelin"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Minimal Postgres logical replication (pgoutput) → NATS skeleton"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "myelin"
+path = "src/main.rs"
+
+[[bench]]
+name = "envelope_json"
+harness = false
+
+[dependencies]
+async-nats = "0.38"
+base64 = "0.22"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio-postgres = { version = "0.7", features = ["runtime"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Logical replication uses PostgreSQL’s CopyBoth / START_REPLICATION path. Upstream
+# `tokio-postgres` does not implement that wire subset (see rust-postgres #116). This
+# crate stays small and focused on exactly that protocol surface; swap the trait impl
+# if you later replace it with a hand-rolled client.
+pgwire-replication = { version = "0.3", default-features = false, features = ["scram"] }
+metrics = "0.24.3"
+# default-features off avoids push-gateway → rustls → aws-lc-sys (heavy native build).
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = [
+    "http-listener",
+] }
+
+[dev-dependencies]
+criterion = "0.8.2"

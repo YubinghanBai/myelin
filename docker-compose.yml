@@ -1,0 +1,43 @@
+# Local dev: Postgres (logical replication) + NATS JetStream.
+#
+#   docker compose up -d
+#   # see main.rs / README snippet for env vars, then:
+#   cargo run
+#
+# Host port 5432; use a different host port if it collides with local Postgres.
+# Connect: PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres
+
+services:
+  postgres:
+    container_name: myelin-postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=16"
+      - "-c"
+      - "max_replication_slots=10"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    container_name: myelin-nats
+    image: nats:2-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command:
+      - "-js"
+      - "-m"
+      - "8222"
