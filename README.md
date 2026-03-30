@@ -83,7 +83,7 @@ Script phases (see header in `scripts/e2e_local.sh` and [`PLAN.md`](./PLAN.md)):
 
 ### Observability
 
-- **Graceful shutdown**: **Ctrl+C** (SIGINT) or **SIGTERM** (Unix, e.g. Kubernetes) stops waiting for the next replication event after the **current** WAL event handler finishes (an in-flight `XLogData` batch is not cancelled mid-way).
+- **Graceful shutdown**: **Ctrl+C** (SIGINT) or **SIGTERM** (Unix, e.g. Kubernetes) stops waiting for the next replication event after the **current** WAL event handler finishes — i.e. we do not cancel **decode + publish** for an `XLogData` chunk once started (including JetStream retry sleeps for that chunk).
 - **Structured tracing** (`target: myelin::replication`): per-chunk `xlog_data` / `commit` at **debug** — use `RUST_LOG=info,myelin::replication=debug` (or `trace`) for decode/publish detail without drowning unrelated crates.
 - **Prometheus** (when `MYELIN_METRICS_ADDR` is set): counters and histograms include, among others:
 
