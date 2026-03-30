@@ -1,10 +1,6 @@
 # myelin
 
-[![CI](https://github.com/YubinghanBai/myelin/actions/workflows/ci.yml/badge.svg)](https://github.com/YubinghanBai/myelin/actions/workflows/ci.yml)
-
 Postgres **logical replication** (`pgoutput`) → **JSON envelopes** + optional **NATS JetStream** publish. Single Rust binary, at-least-once semantics (not exactly-once).
-
-**Repository:** [github.com/YubinghanBai/myelin](https://github.com/YubinghanBai/myelin)
 
 ## Why “myelin”?
 

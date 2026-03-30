@@ -8,12 +8,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Opt into Node 24 for JS-based actions (Node 20 runner deprecation); see:
+  # https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: Swatinem/rust-cache@v2
 
