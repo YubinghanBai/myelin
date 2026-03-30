@@ -3,9 +3,13 @@ name = "myelin"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
-description = "Minimal Postgres logical replication (pgoutput) → NATS skeleton"
+description = "Postgres logical replication (pgoutput) → JSON envelopes, optional NATS JetStream"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/YubinghanBai/myelin"
+documentation = "https://github.com/YubinghanBai/myelin#readme"
+keywords = ["postgres", "cdc", "logical-replication", "nats", "jetstream"]
+categories = ["database"]
 
 [[bin]]
 name = "myelin"
