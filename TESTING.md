@@ -4,18 +4,22 @@
 
 `scripts/e2e_local.sh` builds myelin, uses `docker compose` for Postgres (and optionally NATS), and walks scripted phases. Open the script header for phase descriptions and environment toggles.
 
+The script defaults to host `PGPORT=15432` to avoid accidentally connecting to a developer's local Postgres on `127.0.0.1:5432`. Override `PGPORT` if you need another free host port.
+
+Each run also starts myelin with `MYELIN_METRICS_ADDR` on a random local `127.0.0.1:19xxx` port unless you override it. LSN checks assert both PostgreSQL `confirmed_flush_lsn` progress and the Prometheus `myelin_replication_last_applied_lsn_raw` metric.
+
 ### Common invocations
 
 | Command | What it checks |
 |---------|----------------|
-| `./scripts/e2e_local.sh` | Postgres path without JetStream-focused phases. |
-| `USE_NATS=1 ./scripts/e2e_local.sh` | JetStream path, **Phase 3** + **Phase 6** (`E2E_BULK_ROWS`, default `2000`). |
+| `./scripts/e2e_local.sh` | Postgres path without JetStream-focused phases; asserts slot `confirmed_flush_lsn` advances. |
+| `USE_NATS=1 ./scripts/e2e_local.sh` | JetStream path, **Phase 3** + **Phase 6** (`E2E_BULK_ROWS`, default `2000`); asserts slot `confirmed_flush_lsn` advances. |
 | `USE_NATS=1 E2E_PHASE3=0 E2E_PHASE6=0 E2E_SIGTERM=1 ./scripts/e2e_local.sh` | Short smoke + **SIGTERM** → exit `0` and `graceful shutdown` in logs. |
 | `USE_NATS=1 E2E_NATS_FAULT=1 E2E_SIGTERM=0 ./scripts/e2e_local.sh` | After Phase 2/3/6 (defaults), NATS is stopped → myelin exits non-zero after retries (`E2E_SIGTERM=0` so that step is not masked). |
 
 **Phase 3** (`USE_NATS=1`, skippable with `E2E_PHASE3=0`): oversized **`stall`** path, replay with higher `MYELIN_MAX_PAYLOAD_BYTES`, **`dead_letter`** / DLQ behavior.
 
-**Phase 6** (skippable with `E2E_PHASE6=0`): bulk INSERT → kill connector → restart → each bulk `correlation_id` appears in logs (duplicates allowed).
+**Phase 6** (skippable with `E2E_PHASE6=0`): bulk INSERT → kill connector → restart → each bulk `correlation_id` appears in logs (duplicates allowed), and the logical slot `confirmed_flush_lsn` advances after resume.
 
 ### CI
 

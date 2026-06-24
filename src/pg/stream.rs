@@ -30,6 +30,7 @@ use tokio::pin;
 use crate::config::JetStreamConfig;
 use crate::config::PgReplicationConfig;
 use crate::error::Result;
+use crate::pg::progress::update_applied_lsn;
 use crate::pg::publish::{JetStreamPublisher, LoggingPublisher};
 
 /// How to emit decoded rows.
@@ -60,6 +61,11 @@ impl ReplicationPublisher {
     }
 }
 
+enum StreamStep {
+    Continue,
+    Stop,
+}
+
 /// Waits for SIGINT (all platforms) and SIGTERM on Unix (containers / `kill`).
 pub async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
@@ -75,6 +81,84 @@ pub async fn wait_for_shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn handle_replication_event(
+    cfg: &PgReplicationConfig,
+    publisher: &mut ReplicationPublisher,
+    client: &ReplicationClient,
+    tx_xid: &mut Option<u32>,
+    ev: ReplicationEvent,
+) -> Result<StreamStep> {
+    match ev {
+        ReplicationEvent::Begin { xid, .. } => {
+            metrics::counter!("myelin_replication_events_total", "kind" => "begin").increment(1);
+            *tx_xid = Some(xid);
+            tracing::debug!(
+                target: "myelin::replication",
+                slot = %cfg.slot_name,
+                event = "begin",
+                tx_xid = xid,
+                "replication_protocol"
+            );
+            Ok(StreamStep::Continue)
+        }
+        ReplicationEvent::Commit { end_lsn, .. } => {
+            metrics::counter!("myelin_replication_events_total", "kind" => "commit").increment(1);
+            metrics::gauge!("myelin_replication_last_commit_end_lsn_raw")
+                .set(end_lsn.as_u64() as f64);
+            *tx_xid = None;
+            tracing::debug!(
+                target: "myelin::replication",
+                slot = %cfg.slot_name,
+                event = "commit",
+                end_lsn = %end_lsn,
+                end_lsn_raw = end_lsn.as_u64(),
+                "applied_lsn_from_commit"
+            );
+            // See module doc: boundary-only Commit may carry end_lsn beyond last XLogData wal_end.
+            update_applied_lsn(client, "commit", end_lsn);
+            Ok(StreamStep::Continue)
+        }
+        ReplicationEvent::XLogData { wal_end, data, .. } => {
+            metrics::counter!("myelin_replication_events_total", "kind" => "xlog_data")
+                .increment(1);
+            metrics::histogram!("myelin_replication_xlog_chunk_bytes").record(data.len() as f64);
+            let t0 = Instant::now();
+            publisher
+                .on_xlog_data(client, wal_end, *tx_xid, &data)
+                .await?;
+            let elapsed = t0.elapsed().as_secs_f64();
+            metrics::histogram!("myelin_replication_xlog_chunk_process_seconds").record(elapsed);
+            metrics::gauge!("myelin_replication_last_xlog_wal_end_raw")
+                .set(wal_end.as_u64() as f64);
+            tracing::debug!(
+                target: "myelin::replication",
+                slot = %cfg.slot_name,
+                event = "xlog_data",
+                wal_end = %wal_end,
+                wal_end_raw = wal_end.as_u64(),
+                chunk_bytes = data.len(),
+                process_seconds = elapsed,
+                tx_xid,
+                "decoded_and_published_chunk"
+            );
+            Ok(StreamStep::Continue)
+        }
+        ReplicationEvent::KeepAlive { .. } | ReplicationEvent::Message { .. } => {
+            Ok(StreamStep::Continue)
+        }
+        ReplicationEvent::StoppedAt { .. } => {
+            metrics::counter!("myelin_replication_events_total", "kind" => "stopped").increment(1);
+            tracing::info!(
+                target: "myelin::replication",
+                slot = %cfg.slot_name,
+                event = "stopped",
+                "replication_stream_ended"
+            );
+            Ok(StreamStep::Stop)
+        }
     }
 }
 
@@ -122,75 +206,9 @@ pub async fn run_replication(
                     Some(e) => e,
                     None => break,
                 };
-                match ev {
-                    ReplicationEvent::Begin { xid, .. } => {
-                metrics::counter!("myelin_replication_events_total", "kind" => "begin")
-                    .increment(1);
-                tx_xid = Some(xid);
-                tracing::debug!(
-                    target: "myelin::replication",
-                    slot = %cfg.slot_name,
-                    event = "begin",
-                    tx_xid = xid,
-                    "replication_protocol"
-                );
-                    }
-                    ReplicationEvent::Commit { end_lsn, .. } => {
-                metrics::counter!("myelin_replication_events_total", "kind" => "commit")
-                    .increment(1);
-                metrics::gauge!("myelin_replication_last_commit_end_lsn_raw")
-                    .set(end_lsn.as_u64() as f64);
-                tx_xid = None;
-                tracing::debug!(
-                    target: "myelin::replication",
-                    slot = %cfg.slot_name,
-                    event = "commit",
-                    end_lsn = %end_lsn,
-                    end_lsn_raw = end_lsn.as_u64(),
-                    "applied_lsn_from_commit"
-                );
-                // See module doc: boundary-only Commit may carry end_lsn beyond last XLogData wal_end.
-                client.update_applied_lsn(end_lsn);
-                    }
-                    ReplicationEvent::XLogData { wal_end, data, .. } => {
-                metrics::counter!("myelin_replication_events_total", "kind" => "xlog_data")
-                    .increment(1);
-                metrics::histogram!("myelin_replication_xlog_chunk_bytes")
-                    .record(data.len() as f64);
-                let t0 = Instant::now();
-                publisher
-                    .on_xlog_data(&client, wal_end, tx_xid, &data)
-                    .await?;
-                let elapsed = t0.elapsed().as_secs_f64();
-                metrics::histogram!("myelin_replication_xlog_chunk_process_seconds")
-                    .record(elapsed);
-                metrics::gauge!("myelin_replication_last_xlog_wal_end_raw")
-                    .set(wal_end.as_u64() as f64);
-                tracing::debug!(
-                    target: "myelin::replication",
-                    slot = %cfg.slot_name,
-                    event = "xlog_data",
-                    wal_end = %wal_end,
-                    wal_end_raw = wal_end.as_u64(),
-                    chunk_bytes = data.len(),
-                    process_seconds = elapsed,
-                    tx_xid,
-                    "decoded_and_published_chunk"
-                );
-                    }
-                    ReplicationEvent::KeepAlive { .. } => {}
-                    ReplicationEvent::Message { .. } => {}
-                    ReplicationEvent::StoppedAt { .. } => {
-                metrics::counter!("myelin_replication_events_total", "kind" => "stopped")
-                    .increment(1);
-                tracing::info!(
-                    target: "myelin::replication",
-                    slot = %cfg.slot_name,
-                    event = "stopped",
-                    "replication_stream_ended"
-                );
-                        break;
-                    }
+                match handle_replication_event(cfg, publisher, &client, &mut tx_xid, ev).await? {
+                    StreamStep::Continue => {}
+                    StreamStep::Stop => break,
                 }
             }
         }

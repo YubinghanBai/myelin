@@ -21,13 +21,15 @@ cd "$ROOT"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 export PGHOST="${PGHOST:-127.0.0.1}"
-export PGPORT="${PGPORT:-5432}"
+export PGPORT="${PGPORT:-15432}"
 export PGUSER="${PGUSER:-postgres}"
 export PGPASSWORD="${PGPASSWORD:-postgres}"
 export PGDATABASE="${PGDATABASE:-postgres}"
 export PGADMIN_URL="${PGADMIN_URL:-host=$PGHOST port=$PGPORT user=$PGUSER password=$PGPASSWORD dbname=$PGDATABASE}"
-export RUST_LOG="${RUST_LOG:-info,myelin::envelope=info}"
+export RUST_LOG="${RUST_LOG:-info},myelin::envelope=info,myelin::pg::stream=info"
 export NATS_STREAM="${NATS_STREAM:-MYELIN}"
+export MYELIN_METRICS_ADDR="${MYELIN_METRICS_ADDR:-127.0.0.1:$((19000 + RANDOM % 1000))}"
+METRICS_URL="http://${MYELIN_METRICS_ADDR}/metrics"
 
 PG_CONTAINER="${PG_CONTAINER:-myelin-postgres}"
 NATS_MONITOR_URL="${NATS_MONITOR_URL:-http://127.0.0.1:8222}"
@@ -43,6 +45,7 @@ fi
 docker compose up -d --wait --wait-timeout 180
 
 echo "[e2e] PGHOST=$PGHOST PGPORT=$PGPORT target/release/myelin under $TARGET_DIR"
+echo "[e2e] MYELIN_METRICS_ADDR=$MYELIN_METRICS_ADDR"
 echo "[e2e] Confirming Postgres ($PG_CONTAINER) accepts TCP..."
 for _ in $(seq 1 30); do
   # Prefer TCP inside the container (matches how clients hit the mapped port).
@@ -57,6 +60,20 @@ docker exec "$PG_CONTAINER" pg_isready -h 127.0.0.1 -p 5432 -U postgres -d postg
 docker exec "$PG_CONTAINER" psql -U postgres -d postgres -Atq -c \
   "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = 'myelin_slot' AND active_pid IS NOT NULL;" \
   &>/dev/null || true
+slot_reset=0
+for _ in $(seq 1 10); do
+  if docker exec "$PG_CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+    "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'myelin_slot';" \
+    &>/dev/null; then
+    slot_reset=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$slot_reset" != "1" ]]; then
+  echo "=== FAIL: could not reset stale logical slot myelin_slot before e2e ==="
+  exit 1
+fi
 
 cargo build --release -q
 BIN="$TARGET_DIR/release/myelin"
@@ -136,6 +153,77 @@ stop_myelin() {
     wait "$MYELIN_PID" 2>/dev/null || true
     MYELIN_PID=
   fi
+}
+
+slot_confirmed_flush_lsn() {
+  docker exec "$PG_CONTAINER" psql -U postgres -d postgres -Atq -v ON_ERROR_STOP=1 -c \
+    "SELECT COALESCE(confirmed_flush_lsn::text, '0/0') FROM pg_replication_slots WHERE slot_name = 'myelin_slot';" |
+    tr -d '[:space:]'
+}
+
+wait_metrics_has() {
+  local pattern="$1"
+  local label="$2"
+  local timeout="${3:-30}"
+  local waited=0
+  while (( waited < timeout )); do
+    if curl -fsS "$METRICS_URL" 2>/dev/null | grep -q "$pattern"; then
+      echo "[e2e] Prometheus metric present for $label: $pattern"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "=== FAIL: Prometheus metric $pattern not present for $label after ${timeout}s at $METRICS_URL ==="
+  curl -fsS "$METRICS_URL" 2>/dev/null | tail -60 || true
+  return 1
+}
+
+require_slot_confirmed_flush_lsn() {
+  local label="$1"
+  local timeout="${2:-60}"
+  local waited=0
+  local current=""
+  while (( waited < timeout )); do
+    current="$(slot_confirmed_flush_lsn || true)"
+    if [[ -n "$current" ]]; then
+      echo "$current"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "=== FAIL: logical slot myelin_slot not visible for $label after ${timeout}s ===" >&2
+  docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c \
+    "SELECT slot_name, active, restart_lsn, confirmed_flush_lsn FROM pg_replication_slots ORDER BY slot_name;" >&2 || true
+  return 1
+}
+
+wait_slot_confirmed_lsn_gt() {
+  local before="$1"
+  local label="$2"
+  local timeout="${3:-90}"
+  local waited=0
+  local current=""
+  local advanced=""
+  while (( waited < timeout )); do
+    current="$(slot_confirmed_flush_lsn || true)"
+    if [[ -n "$current" && "$current" != "0/0" ]]; then
+      advanced="$(docker exec "$PG_CONTAINER" psql -U postgres -d postgres -Atq -v ON_ERROR_STOP=1 -c \
+        "SELECT pg_wal_lsn_diff('${current}'::pg_lsn, '${before}'::pg_lsn)::numeric > 0;" | tr -d '[:space:]')"
+      if [[ "$advanced" == "t" ]]; then
+        echo "[e2e] Slot confirmed_flush_lsn advanced for $label: $before -> $current"
+        wait_metrics_has "myelin_replication_last_applied_lsn_raw" "$label" 30
+        return 0
+      fi
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "=== FAIL: slot confirmed_flush_lsn did not advance for $label after ${timeout}s (before=$before current=${current:-unknown}) ==="
+  docker exec "$PG_CONTAINER" psql -U postgres -d postgres -c \
+    "SELECT slot_name, active, restart_lsn, confirmed_flush_lsn, pg_current_wal_lsn() AS current_wal_lsn, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS wal_retained_approx FROM pg_replication_slots WHERE slot_name = 'myelin_slot';" || true
+  return 1
 }
 
 # Oversized row: jsonb pad forces serialized envelope over typical E2E caps.
@@ -323,6 +411,8 @@ phase6_bulk_kill_resume() {
 
   start_myelin_to "$LOG_P6"
   sleep 3
+  local lsn_before_p6
+  lsn_before_p6="$(require_slot_confirmed_flush_lsn "Phase 6 start" 60)"
 
   echo "[e2e] Phase 6a: INSERT $n rows (correlation_id e2e-bulk-${bulk_tag}-<i>)..."
   # Shell-expand sanitized bulk_tag + integer n (avoid psql :var — brittle under docker exec).
@@ -355,6 +445,7 @@ FROM generate_series(1, ${n}) AS g(i);
     waited=$((waited + 1))
   done
 
+  wait_slot_confirmed_lsn_gt "$lsn_before_p6" "Phase 6 bulk resume" 180
   stop_myelin
 
   local db_count
@@ -399,21 +490,25 @@ if [[ "${USE_NATS:-0}" != "1" ]]; then
   echo "========== Phase 1: dry-run + slot resume =========="
   start_myelin
   sleep 6
+  LSN_BEFORE_P1_BURST="$(require_slot_confirmed_flush_lsn "Phase 1 burst" 60)"
   echo "[e2e] Phase 1a: INSERT 3 rows (correlation_id e2e-${E2E_TAG}-bN)..."
   insert_row "e2e-${E2E_TAG}-b1"
   insert_row "e2e-${E2E_TAG}-b2"
   insert_row "e2e-${E2E_TAG}-b3"
   sleep 4
+  wait_slot_confirmed_lsn_gt "$LSN_BEFORE_P1_BURST" "Phase 1 burst" 90
   echo "[e2e] Phase 1b: stop myelin, restart (same slot — expect no historical replay requirement)..."
   stop_myelin
   sleep 2
   start_myelin
   sleep 6
+  LSN_BEFORE_P1_RESUME="$(require_slot_confirmed_flush_lsn "Phase 1 restart" 60)"
   echo "[e2e] Phase 1c: INSERT after restart (must be decoded)..."
   insert_row "e2e-${E2E_TAG}-resume"
   sleep 5
   echo "[e2e] Phase 1d: UPDATE + DELETE envelopes..."
   e2e_update_delete_smoke
+  wait_slot_confirmed_lsn_gt "$LSN_BEFORE_P1_RESUME" "Phase 1 restart resume" 90
   stop_myelin
 
   echo "--- myelin tail (Phase 1) ---"
@@ -462,10 +557,12 @@ else
 
   start_myelin
   sleep 8
+  LSN_BEFORE_P2_BURST="$(require_slot_confirmed_flush_lsn "Phase 2 burst" 60)"
   echo "[e2e] INSERT 2 rows (JetStream)..."
   insert_row "e2e-${E2E_TAG}-j1"
   insert_row "e2e-${E2E_TAG}-j2"
   sleep 6
+  wait_slot_confirmed_lsn_gt "$LSN_BEFORE_P2_BURST" "Phase 2 burst" 90
   MSG1="$(jsz_stream_messages || true)"
   MSG1="${MSG1//[^0-9]/}"
   [[ -n "$MSG1" ]] || MSG1=0
@@ -485,10 +582,12 @@ else
   export MYELIN_LOG_ENVELOPE=1
   start_myelin
   sleep 8
+  LSN_BEFORE_P2_RECONNECT="$(require_slot_confirmed_flush_lsn "Phase 2 reconnect" 60)"
   insert_row "e2e-${E2E_TAG}-j-after-reconnect"
   sleep 6
   echo "[e2e] Phase 2c: UPDATE + DELETE envelopes (log via MYELIN_LOG_ENVELOPE=1)..."
   e2e_update_delete_smoke
+  wait_slot_confirmed_lsn_gt "$LSN_BEFORE_P2_RECONNECT" "Phase 2 reconnect" 90
   MSG2="$(jsz_stream_messages || true)"
   MSG2="${MSG2//[^0-9]/}"
   [[ -n "$MSG2" ]] || MSG2=0

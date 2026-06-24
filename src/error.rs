@@ -12,6 +12,8 @@ pub enum MyelinError {
     Json(#[from] serde_json::Error),
     #[error("nats: {0}")]
     Nats(String),
+    #[error("config: {0}")]
+    Config(String),
     #[error("payload {bytes} bytes exceeds max {max} (Claim Check — keep messages small)")]
     PayloadTooLarge { bytes: usize, max: usize },
     #[error("pgoutput parse: {0}")]

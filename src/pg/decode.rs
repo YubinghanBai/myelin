@@ -53,6 +53,11 @@ pub enum RawPgOutputMsg {
         rel_id: u32,
         tuple: TupleData,
     },
+    Truncate {
+        rel_ids: Vec<u32>,
+        cascade: bool,
+        restart_identity: bool,
+    },
 }
 
 #[derive(Default)]
@@ -459,6 +464,67 @@ fn parse_delete_body(body: &[u8]) -> Result<(u32, TupleData, usize)> {
     Ok((rel_id, tuple, c.consumed_from(start)))
 }
 
+fn is_known_opcode(tag: u8) -> bool {
+    matches!(tag, b'R' | b'I' | b'U' | b'D' | b'T' | b'Y' | b'O')
+}
+
+/// `Truncate`: optional proto-2 xid, relation count, option bits, then relation ids.
+fn parse_truncate_body(body: &[u8]) -> Result<(Vec<u32>, bool, bool, usize)> {
+    let mut best: Option<(Vec<u32>, bool, bool, usize, i32)> = None;
+    for leading_xid in [false, true] {
+        if let Ok((rel_ids, options, consumed)) = parse_truncate_inner(body, leading_xid) {
+            let mut score = 0;
+            if consumed == body.len() {
+                score += 3;
+            } else if body.get(consumed).copied().is_some_and(is_known_opcode) {
+                score += 2;
+            } else {
+                continue;
+            }
+            if leading_xid {
+                score += 1;
+            }
+            if rel_ids.iter().all(|id| *id > 0) {
+                score += 1;
+            }
+            let cascade = options & 0x01 != 0;
+            let restart_identity = options & 0x02 != 0;
+            if best.as_ref().is_none_or(|(_, _, _, _, s)| score > *s) {
+                best = Some((rel_ids, cascade, restart_identity, consumed, score));
+            }
+        }
+    }
+    best.map(|(rel_ids, cascade, restart_identity, consumed, _)| {
+        (rel_ids, cascade, restart_identity, consumed)
+    })
+    .ok_or_else(|| MyelinError::PgOutputParse("failed to parse Truncate (T) message".into()))
+}
+
+fn parse_truncate_inner(body: &[u8], leading_xid: bool) -> Result<(Vec<u32>, u8, usize)> {
+    let mut c = Cursor::new(body);
+    let start = c.pos;
+    if leading_xid {
+        let _xid = c.take_u32()?;
+    }
+    let nrels = c.take_i32()?;
+    if !(1..=1024).contains(&nrels) {
+        return Err(MyelinError::PgOutputParse(format!(
+            "invalid relation count in Truncate: {nrels}"
+        )));
+    }
+    let options = c.take_u8()?;
+    if options & !0x03 != 0 {
+        return Err(MyelinError::PgOutputParse(format!(
+            "unknown Truncate options bits: {options:#x}"
+        )));
+    }
+    let mut rel_ids = Vec::with_capacity(nrels as usize);
+    for _ in 0..nrels {
+        rel_ids.push(c.take_u32()?);
+    }
+    Ok((rel_ids, options, c.consumed_from(start)))
+}
+
 /// Parse **all** pgoutput messages packed into one logical chunk (single `XLogData.data` payload).
 ///
 /// `pgwire-replication` already strips standalone `Begin` / `Commit` into
@@ -505,9 +571,13 @@ pub fn parse_pgoutput_messages(data: &[u8]) -> Result<Vec<RawPgOutputMsg>> {
                 rest = &rest[1 + consumed..];
             }
             b'T' => {
-                return Err(MyelinError::PgOutputParse(
-                    "Truncate (T) not implemented in this build".into(),
-                ));
+                let (rel_ids, cascade, restart_identity, consumed) = parse_truncate_body(body)?;
+                out.push(RawPgOutputMsg::Truncate {
+                    rel_ids,
+                    cascade,
+                    restart_identity,
+                });
+                rest = &rest[1 + consumed..];
             }
             other => {
                 return Err(MyelinError::PgOutputParse(format!(
@@ -702,6 +772,50 @@ mod tests {
         ins.extend_from_slice(&0i16.to_be_bytes());
         let msgs = parse_pgoutput_messages(&ins).unwrap();
         assert!(matches!(msgs[0], RawPgOutputMsg::Insert { rel_id: 42, .. }));
+    }
+
+    #[test]
+    fn truncate_message_is_parsed() {
+        let mut truncate = Vec::new();
+        truncate.push(b'T');
+        truncate.extend_from_slice(&2i32.to_be_bytes());
+        truncate.push(0x03);
+        truncate.extend_from_slice(&42u32.to_be_bytes());
+        truncate.extend_from_slice(&43u32.to_be_bytes());
+
+        let msgs = parse_pgoutput_messages(&truncate).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(
+            &msgs[0],
+            RawPgOutputMsg::Truncate {
+                rel_ids,
+                cascade: true,
+                restart_identity: true,
+            } if rel_ids == &vec![42, 43]
+        ));
+    }
+
+    #[test]
+    fn truncate_consumes_only_its_message() {
+        let mut buf = Vec::new();
+        buf.push(b'T');
+        buf.extend_from_slice(&1i32.to_be_bytes());
+        buf.push(0x00);
+        buf.extend_from_slice(&42u32.to_be_bytes());
+
+        buf.push(b'R');
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        put_string(&mut buf, "s");
+        put_string(&mut buf, "t");
+        buf.push(0u8);
+        buf.extend_from_slice(&0i16.to_be_bytes());
+
+        let msgs = parse_pgoutput_messages(&buf).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert!(
+            matches!(&msgs[0], RawPgOutputMsg::Truncate { rel_ids, .. } if rel_ids == &vec![42])
+        );
+        assert!(matches!(&msgs[1], RawPgOutputMsg::Relation(r) if r.table == "t"));
     }
 
     #[test]

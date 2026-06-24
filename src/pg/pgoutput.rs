@@ -234,6 +234,25 @@ pub fn materialize_messages(
                     old_row: None,
                 });
             }
+            RawPgOutputMsg::Truncate { rel_ids, .. } => {
+                for rel_id in rel_ids {
+                    let Some(rel) = relations.get(&rel_id) else {
+                        return Err(MyelinError::PgOutputParse(format!(
+                            "Truncate for unknown relation id {rel_id} (missing prior Relation message)"
+                        )));
+                    };
+                    out.push(ChangeEnvelope {
+                        lsn_hex: lsn_hex.to_owned(),
+                        tx_xid,
+                        op: "truncate",
+                        schema: rel.namespace.clone(),
+                        table: rel.table.clone(),
+                        rel_id,
+                        row: serde_json::Map::new(),
+                        old_row: None,
+                    });
+                }
+            }
         }
     }
     Ok(out)
@@ -406,5 +425,26 @@ mod tests {
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].op, "delete");
         assert_eq!(envs[0].row["kind"], serde_json::json!("gone"));
+    }
+
+    #[test]
+    fn truncate_envelope() {
+        let rel_buf = sample_relation_buf();
+        let mut truncate = Vec::new();
+        truncate.push(b'T');
+        truncate.extend_from_slice(&1i32.to_be_bytes());
+        truncate.push(0x00);
+        truncate.extend_from_slice(&9u32.to_be_bytes());
+
+        let mut rels: HashMap<u32, RelationMeta> = HashMap::new();
+        let _ = materialize_messages(&mut rels, "0/0", None, &rel_buf).unwrap();
+        let envs = materialize_messages(&mut rels, "1/E", Some(11), &truncate).unwrap();
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].op, "truncate");
+        assert_eq!(envs[0].schema, "public");
+        assert_eq!(envs[0].table, "events");
+        assert_eq!(envs[0].rel_id, 9);
+        assert!(envs[0].row.is_empty());
+        assert!(envs[0].old_row.is_none());
     }
 }

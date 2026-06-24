@@ -16,6 +16,7 @@ use crate::config::{JetStreamConfig, OversizedPayloadPolicy, PublishRetryConfig}
 use crate::error::{MyelinError, Result};
 use crate::pg::decode::RelationMeta;
 use crate::pg::pgoutput::{ChangeEnvelope, materialize_messages};
+use crate::pg::progress::update_applied_lsn;
 
 fn dead_letter_notice_value(
     env: &ChangeEnvelope,
@@ -37,9 +38,9 @@ fn dead_letter_notice_value(
     })
 }
 
-/// When `MYELIN_LOG_ENVELOPE=1`, log each JetStream publish like dry-run (`myelin::envelope`) — for e2e / debugging only.
-fn log_jetstream_envelope_if_enabled(env: &ChangeEnvelope) -> Result<()> {
-    if !matches!(std::env::var("MYELIN_LOG_ENVELOPE").as_deref(), Ok("1")) {
+/// When enabled, log each JetStream publish like dry-run (`myelin::envelope`) for e2e/debugging.
+fn log_jetstream_envelope_if_enabled(enabled: bool, env: &ChangeEnvelope) -> Result<()> {
+    if !enabled {
         return Ok(());
     }
     tracing::info!(
@@ -62,6 +63,7 @@ pub struct JetStreamPublisher {
     subject_prefix: String,
     max_payload_bytes: usize,
     oversized_policy: OversizedPayloadPolicy,
+    log_envelopes: bool,
     dead_letter_subject: String,
     publish_retry: PublishRetryConfig,
     relations: HashMap<u32, RelationMeta>,
@@ -88,6 +90,7 @@ impl JetStreamPublisher {
             subject_prefix: cfg.subject_prefix.trim_end_matches('.').to_owned(),
             max_payload_bytes: cfg.max_payload_bytes,
             oversized_policy: cfg.oversized_policy,
+            log_envelopes: cfg.log_envelopes,
             dead_letter_subject: cfg.dead_letter_subject.clone(),
             publish_retry: cfg.publish_retry.clone(),
             relations: HashMap::new(),
@@ -193,7 +196,6 @@ impl JetStreamPublisher {
                         });
                     }
                     OversizedPayloadPolicy::DeadLetter => {
-                        metrics::counter!("myelin_oversize_dlq_total").increment(1);
                         tracing::error!(
                             target: "myelin::dlq",
                             bytes = payload.len(),
@@ -218,6 +220,7 @@ impl JetStreamPublisher {
                         }
                         self.publish_ack_with_retry(&self.dead_letter_subject, Bytes::from(dlq))
                             .await?;
+                        metrics::counter!("myelin_oversize_dlq_total").increment(1);
                     }
                 }
                 continue;
@@ -225,9 +228,9 @@ impl JetStreamPublisher {
             self.publish_ack_with_retry(&subject, Bytes::from(payload))
                 .await?;
             metrics::counter!("myelin_jetstream_publish_ack_total", "op" => env.op).increment(1);
-            log_jetstream_envelope_if_enabled(&env)?;
+            log_jetstream_envelope_if_enabled(self.log_envelopes, &env)?;
         }
-        repl.update_applied_lsn(wal_end);
+        update_applied_lsn(repl, "xlog_data", wal_end);
         Ok(())
     }
 }
@@ -288,7 +291,7 @@ impl LoggingPublisher {
                 "cdc_envelope"
             );
         }
-        repl.update_applied_lsn(wal_end);
+        update_applied_lsn(repl, "xlog_data", wal_end);
         Ok(())
     }
 }

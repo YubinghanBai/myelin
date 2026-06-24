@@ -4,7 +4,7 @@
 #   # see main.rs / README snippet for env vars, then:
 #   cargo run
 #
-# Host port 5432; use a different host port if it collides with local Postgres.
+# Host port 5432 by default; set PGPORT=15432 (or another free port) if it collides with local Postgres.
 # Connect: PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres
 
 services:
@@ -17,7 +17,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      - "${PGPORT:-5432}:5432"
     command:
       - "postgres"
       - "-c"
